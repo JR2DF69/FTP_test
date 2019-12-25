@@ -22,7 +22,7 @@ func (fsParams *FileSystem) InitFileSystem(config *Config.ConfigStorage) {
 
 func (fsParams *FileSystem) checkFTPWDForSlash() string {
 	if len(fsParams.FTPWorkingDirectory) == 0 {
-		return fsParams.FTPWorkingDirectory
+		return "/"
 	}
 	firstSym := fsParams.FTPWorkingDirectory[0]
 	if firstSym != '/' {
@@ -30,19 +30,19 @@ func (fsParams *FileSystem) checkFTPWDForSlash() string {
 	}
 	return fsParams.FTPWorkingDirectory
 }
-func (fsParams *FileSystem) LIST(directory string) []string {
+func (fsParams *FileSystem) LIST(directory string) ([]string, error) {
 	if directory == "" {
 		//using working directory
 		directory = fsParams.FTPWorkingDirectory
 	}
 	directory = fmt.Sprint(fsParams.FTPRootFolder, fsParams.checkFTPWDForSlash())
-	dirStat, err := os.Stat(directory)
-	if dirStat.IsDir() == false {
-		return make([]string, 1)
+	err := checkIfDir(directory)
+	if err != nil {
+		return nil, err
 	}
 	lsOutput, err := executeShellCommands("ls", "-ltr", directory)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	lsArray := strings.Split(lsOutput, "\n")
 	var outputString string
@@ -59,13 +59,42 @@ func (fsParams *FileSystem) LIST(directory string) []string {
 		fmt.Println(line)
 	}
 	outputArray := strings.Split(outputString, "\r\n")
-	return outputArray
+	return outputArray, nil
+}
+func checkIfDir(dirName string) error {
+	dirStat, err := os.Stat(dirName)
+	if err != nil {
+		return err
+	}
+	if dirStat.IsDir() == false {
+		return errors.New("Not a dir")
+	}
+	return nil
 }
 func (fsParams *FileSystem) CWD(directory string) error {
+	directoryForCheck := fmt.Sprint(fsParams.FTPRootFolder, "/", directory)
+	err := checkIfDir(directoryForCheck)
+	if err != nil {
+		return err
+	}
 	fsParams.FTPWorkingDirectory = directory
 	return nil
 }
-
+func (fsParams *FileSystem) RETR(fileName string) (*os.File, error) {
+	fullFileName := fmt.Sprint(fsParams.FTPRootFolder, fsParams.checkFTPWDForSlash(), fileName)
+	fi, err := os.Stat(fullFileName)
+	if err != nil {
+		return nil, err
+	}
+	if fi.IsDir() {
+		return nil, errors.New("RETR File is dir")
+	}
+	file, err := os.Open(fullFileName)
+	if err != nil {
+		return nil, err
+	}
+	return file, nil
+}
 func (fsParams *FileSystem) GetFileSize(FileName string) (size int64, err error) {
 	fileName := fmt.Sprint(fsParams.FTPRootFolder, FileName)
 	fileInfo, err := os.Stat(fileName)

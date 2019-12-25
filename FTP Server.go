@@ -3,14 +3,15 @@ package main
 
 import (
 	"FTPServ/Config"
+	"FTPServ/FTPAuth"
 	"FTPServ/Logger"
 	"FTPServ/ftpfs"
 	"bufio"
 	"bytes"
+	"io"
 	"math"
 	"runtime"
 	"strconv"
-
 	//"encoding/hex"
 	"errors"
 	"fmt"
@@ -22,15 +23,18 @@ import (
 var config Config.ConfigStorage
 
 var TCPSockParameters TCPSockParams
+var Users *FTPAuth.Users
 
 type TCPSockParams struct {
 	ServerAddress net.TCPAddr
 	Listener      *net.TCPListener
 }
 
+type DataConnectionMode uint
+
 const (
-	DataConnectionModeActive  = iota
-	DataConnectionModePassive = iota
+	DataConnectionModeActive  DataConnectionMode = iota
+	DataConnectionModePassive                    = iota
 )
 
 type FTPConnection struct {
@@ -38,17 +42,19 @@ type FTPConnection struct {
 	Writer               *bufio.Writer
 	Reader               *bufio.Reader
 	DataConnection       FTPDataConnection
+	User                 *FTPAuth.User
 	TransferType         string
 	DataConnectionOpened bool
 	FileSystem           ftpfs.FileSystem
 }
 type FTPDataConnection struct {
-	DataPortAddress    net.TCPAddr
-	DataConnectionMode int
-	Connection         *net.TCPConn
-	Listener           net.Listener
-	Writer             *bufio.Writer
-	Reader             *bufio.Reader
+	DataPortAddress     net.TCPAddr
+	DataConnectionMode  DataConnectionMode
+	Connection          *net.TCPConn
+	Listener            net.Listener
+	Writer              *bufio.Writer
+	Reader              *bufio.Reader
+	PassiveModeDataConn net.Conn
 }
 
 func main() {
@@ -56,7 +62,12 @@ func main() {
 	config = Config.LoadConfig()
 	err := createTCPSocket()
 	if err != nil {
-		Logger.Log(fmt.Sprint(err, ". Exiting..."))
+		Logger.Log("func main(): ", err, ". Server stops now")
+		return
+	}
+	Users, err = FTPAuth.LoadUsersList()
+	if err != nil {
+		Logger.Log("func main(): failed to load users configuration. Server stops now(", err, ")")
 		return
 	}
 	//бесконечно пытаемся поймать входящее соединение
@@ -64,10 +75,11 @@ func main() {
 		//а вот и оно
 		conn, _ := TCPSockParameters.Listener.AcceptTCP()
 		if err != nil {
-			Logger.Log(fmt.Sprint("Connection Listener error: ", err, ". Ignoring connection..."))
+			Logger.Log("Connection Listener error: ", err, ". Ignoring connection...")
 			continue
 		}
-		Logger.Log(fmt.Sprint("Got incoming connection from: ", conn.RemoteAddr(), ". Sending 220"))
+		Logger.Log("Got incoming connection from: ", conn.RemoteAddr(), ". Sending 220")
+
 		FTPConn := new(FTPConnection)
 		if FTPConn.InitConnection(conn) != nil {
 			Logger.Log("Init new connection error: ", err)
@@ -125,7 +137,7 @@ func GetMachineIPAddress() (net.IP, error) {
 	defer os.Exit(1)
 	return nil, errors.New("machine has no IP address. Exiting...")
 }
-func (FTPConn *FTPConnection) sendResponseToClient(command, comment interface{}) error {
+func (FTPConn *FTPConnection) sendResponseToClient(command string, comment interface{}) error {
 	defer Logger.Log("Command ", command, " sent to Client")
 	switch command {
 	case "200":
@@ -163,6 +175,7 @@ func CountDataPort() []string {
 	dataPortString := []string{strconv.Itoa(int(part1)), strconv.Itoa(int(part2))}
 	return dataPortString
 }
+
 func (FTPConn *FTPConnection) CloseConnection() error {
 	//close DataConnection
 	FTPConn.DataConnection.CloseConnection()
@@ -173,7 +186,7 @@ func (FTPConn *FTPConnection) CloseConnection() error {
 	}
 	return nil
 }
-func (DataConn *FTPDataConnection) Init(ConnectionMode int, DataPort string) error {
+func (DataConn *FTPDataConnection) Init(ConnectionMode DataConnectionMode, DataPort string) error {
 	DataConn.DataConnectionMode = ConnectionMode
 	if ConnectionMode == DataConnectionModeActive {
 		DataConn.parseDataPortAddr(DataPort)
@@ -181,14 +194,17 @@ func (DataConn *FTPDataConnection) Init(ConnectionMode int, DataPort string) err
 		return nil
 	} else if ConnectionMode == DataConnectionModePassive {
 		DataConn.parseDataPortAddr(DataPort)
-		DataConn.OpenConnection()
 		Logger.Log(fmt.Sprint("(DataConn *FTPDataConnection) Init(PASSIVE) PASV ADDRESS: ", DataConn.DataPortAddress))
+		DataConn.OpenConnection()
 		return nil
 	}
 	return nil
 }
 
 func (DataConn *FTPDataConnection) OpenConnection() error {
+	if DataConn.CheckConnectionOpened() == true {
+		return nil
+	}
 	if DataConn.DataConnectionMode == DataConnectionModeActive {
 		conn, err := net.DialTCP("tcp", nil, &DataConn.DataPortAddress)
 		if err != nil {
@@ -218,15 +234,30 @@ func (DataConn *FTPDataConnection) OpenConnection() error {
 	}
 	return nil
 }
+func (DataConn *FTPDataConnection) CheckConnectionOpened() bool {
+	if DataConn.DataConnectionMode == DataConnectionModeActive {
+		if DataConn.Connection != nil {
+			return true
+		}
+	} else if DataConn.DataConnectionMode == DataConnectionModePassive {
+		if DataConn.Listener != nil {
+			return true
+		}
+	}
+	return false
+}
 func (DataConn *FTPDataConnection) CloseConnection() error {
+	if DataConn.PassiveModeDataConn != nil {
+		DataConn.PassiveModeDataConn.Close()
+	}
 	if DataConn.Listener != nil {
 		DataConn.Listener.Close()
 	}
 	if DataConn.Connection != nil {
-		//close connection
 		DataConn.Connection.Close()
 	}
-	DataConn.Connection, DataConn.Writer, DataConn.Reader, DataConn.Listener = nil, nil, nil, nil
+	DataConn.PassiveModeDataConn, DataConn.Connection, DataConn.Writer, DataConn.Reader, DataConn.Listener = nil, nil, nil, nil, nil
+	Logger.Log("(DataConn *FTPDataConnection) CloseConnection(): all connection were closed")
 	return nil
 }
 func (FTPConn *FTPConnection) ParseIncomingConnection() {
@@ -255,7 +286,12 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 				directory := command[5:]
 				err := FTPConn.FileSystem.CWD(directory)
 				if err != nil {
-					break
+					if err.Error() == "Not a dir" {
+						FTPConn.sendResponseToClient("550", "Not a directory")
+						break
+					}
+					Logger.Log("CWD: ", err)
+					FTPConn.sendResponseToClient("550", "Couldn't get directory")
 				}
 				FTPConn.sendResponseToClient("250", "DirectoryChanged")
 				break
@@ -282,15 +318,25 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 			case "FEAT":
 				FTPConn.sendResponseToClient("211", "-Server feature:\r\n SIZE\r\n211 End")
 			case "LIST":
+				listing, err := FTPConn.FileSystem.LIST("")
+				if err != nil {
+					if err.Error() == "Not a dir" {
+						FTPConn.sendResponseToClient("550", "Not a directory")
+						break
+					}
+				}
+				if FTPConn.DataConnection.OpenConnection() != nil {
+					
+				}
 				FTPConn.sendResponseToClient("150", "Here comes the directory listing")
-				listing := FTPConn.FileSystem.LIST("")
 				if FTPConn.DataConnection.DataConnectionMode == DataConnectionModeActive {
-					if FTPConn.DataConnection.OpenConnection() == nil {
+					{
 						for _, list := range listing {
 							FTPConn.DataConnection.Writer.Write([]byte(fmt.Sprint(list, "\r\n")))
 							FTPConn.DataConnection.Writer.Flush()
 						}
 						FTPConn.sendResponseToClient("226", "Directory sent OK")
+						FTPConn.DataConnection.CloseConnection()
 						break
 					}
 				} else if FTPConn.DataConnection.DataConnectionMode == DataConnectionModePassive {
@@ -304,9 +350,10 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 						writer.Write([]byte(fmt.Sprint(line, "\r\n")))
 						writer.Flush()
 					}
+					FTPConn.sendResponseToClient("226", "Directory sent OK")
 					conn.Close()
 					conn = nil
-					FTPConn.sendResponseToClient("226", "Directory sent OK")
+					FTPConn.DataConnection.CloseConnection()
 					break
 				}
 				//send error message
@@ -341,10 +388,25 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 						break
 					}
 				}
+				user := Users.CheckUserName(userNameStr)
+				if user == nil {
+					Logger.Log("Command \"USER\": wrong user name!")
+					FTPConn.sendResponseToClient("430", "Wrong username or password")
+					break
+				}
+				FTPConn.User = user
 				FTPConn.sendResponseToClient("331", "")
 				break
 			case "PASS":
-				Logger.Log("user pass got")
+				pswd := command[5:]
+				if FTPConn.User == nil {
+					FTPConn.sendResponseToClient("430", "Wrong username or password")
+					break
+				}
+				if FTPConn.User.CheckPswd(pswd) == false {
+					FTPConn.sendResponseToClient("430", "Wrong username or password")
+					break
+				}
 				FTPConn.sendResponseToClient("230", "")
 				//new pass
 				break
@@ -353,6 +415,30 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 				Port := command[5:]
 				FTPConn.DataConnection.Init(DataConnectionModeActive, Port)
 				FTPConn.sendResponseToClient("200", fmt.Sprint("PORT command done", FTPConn.DataConnection.DataPortAddress))
+			case "RETR":
+				fileName := command[5:]
+				file, err := FTPConn.FileSystem.RETR(fileName)
+				if err != nil {
+					Logger.Log("RETR Command, fsRETR error: ", err)
+					FTPConn.sendResponseToClient("550", "File transfer error")
+					break
+				}
+				FTPConn.sendResponseToClient("150", fmt.Sprint("Opening binary stream for", fileName))
+				sendFileBuff := make([]byte, config.BufferSize)
+				for {
+					_, err := file.Read(sendFileBuff)
+					if err == io.EOF {
+						break
+					}
+					err = FTPConn.DataConnection.sendBinaryData(sendFileBuff)
+					if err != nil {
+						Logger.Log("RETR Command, File transfer error: ", err)
+						FTPConn.sendResponseToClient("550", "File transfer error")
+						break
+					}
+				}
+				FTPConn.DataConnection.CloseConnection()
+				FTPConn.sendResponseToClient("226", "Transfer complete")
 			case "SYST":
 				FTPConn.sendResponseToClient("215", runtime.GOOS)
 			case "QUIT":
@@ -370,4 +456,24 @@ func (DataConn *FTPDataConnection) parseDataPortAddr(dataPort string) {
 	portnum := num1*256 + num2
 	ip := net.ParseIP(fmt.Sprint(PortParamsSplitted[0], ".", PortParamsSplitted[1], ".", PortParamsSplitted[2], ".", PortParamsSplitted[3]))
 	DataConn.DataPortAddress = net.TCPAddr{ip, portnum, ""}
+}
+func (DataConn *FTPDataConnection) sendBinaryData(dataBytes []byte) error {
+	/*if DataConn.CheckConnectionOpened() == false {
+		DataConn.OpenConnection()
+	}*/
+	if DataConn.DataConnectionMode == DataConnectionModeActive {
+		DataConn.Connection.Write(dataBytes)
+	} else if DataConn.DataConnectionMode == DataConnectionModePassive {
+		if DataConn.PassiveModeDataConn != nil {
+			DataConn.PassiveModeDataConn.Write(dataBytes)
+			return nil
+		}
+		conn, err := DataConn.Listener.Accept()
+		if err != nil {
+			return err
+		}
+		conn.Write(dataBytes)
+		DataConn.PassiveModeDataConn = conn
+	}
+	return nil
 }
