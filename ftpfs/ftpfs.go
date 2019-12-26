@@ -2,7 +2,7 @@
 package ftpfs
 
 import (
-	"FTPServ/Config"
+	"FTPServ/FTPServConfig"
 	"errors"
 	"fmt"
 	"os"
@@ -16,7 +16,7 @@ type FileSystem struct {
 	FTPWorkingDirectory string
 }
 
-func (fsParams *FileSystem) InitFileSystem(config *Config.ConfigStorage) {
+func (fsParams *FileSystem) InitFileSystem(config *FTPServConfig.ConfigStorage) {
 	fsParams.FTPRootFolder = config.FTPRootFolder
 }
 
