@@ -74,13 +74,15 @@ func (FTPConn *FTPConnection) sendResponseToClient(command string, comment inter
 	case "331":
 		FTPConn.writeMessageToWriter("331 Password")
 	case "530":
-		FTPConn.writeMessageToWriter("530 Anonymous denied on server")
+		FTPConn.writeMessageToWriter("530 Not logged in")
 	default:
 		FTPConn.writeMessageToWriter(fmt.Sprint(command, " ", comment))
 	}
 	return nil
 }
-
+func (FTPConn *FTPConnection) IsAuthenticated() bool {
+	return FTPConn.User != nil
+}
 func (FTPConn *FTPConnection) CloseConnection(TCPClosed bool) error {
 	//close DataConnection
 	//FTPConn.DataConnection.CloseConnection()
@@ -125,6 +127,10 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 			case "CCC":
 				break
 			case "CWD":
+				if FTPConn.IsAuthenticated() == false {
+					FTPConn.sendResponseToClient("530", "Not logged in")
+					break
+				}
 				directory := command[5:]
 				err := FTPConn.FileSystem.CWD(directory)
 				if err != nil {
@@ -146,7 +152,11 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 			case "MKD":
 				break
 			case "PWD":
-				FTPConn.FileSystem.InitFileSystem(FTPConn.GlobalConfig)
+				if FTPConn.IsAuthenticated() == false {
+					FTPConn.sendResponseToClient("530", "Not logged in")
+					break
+				}
+				FTPConn.FileSystem.InitFileSystem(FTPConn.GlobalConfig, FTPConn.User)
 				FTPConn.sendResponseToClient("257", "/")
 				break
 			case "RMD":
@@ -160,6 +170,10 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 			case "FEAT":
 				FTPConn.sendResponseToClient("211", "-Server feature:\r\n SIZE\r\n211 END")
 			case "LIST":
+				if FTPConn.IsAuthenticated() == false {
+					FTPConn.sendResponseToClient("530", "Not logged in")
+					break
+				}
 				listing, err := FTPConn.FileSystem.LIST("")
 				if err != nil {
 					if err.Error() == "Not a dir" {
@@ -179,6 +193,10 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 				break
 				//send error message*/
 			case "PASV":
+				if FTPConn.IsAuthenticated() == false {
+					FTPConn.sendResponseToClient("530", "Not logged in")
+					break
+				}
 				passPortAddress, err := FTPConn.DataConnection.InitPassiveConnection()
 				if err != nil {
 					Logger.Log("PASV: couldn't open passive port...", err)
@@ -187,10 +205,18 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 				}
 				FTPConn.sendResponseToClient("227", fmt.Sprint("Entering Passive Mode (", passPortAddress, ").\r\n"))
 			case "TYPE":
+				if FTPConn.IsAuthenticated() == false {
+					FTPConn.sendResponseToClient("530", "Not logged in")
+					break
+				}
 				sendType := command[5:]
 				FTPConn.TransferType = sendType
 				FTPConn.sendResponseToClient("200", "Set type successful!")
 			case "SIZE":
+				if FTPConn.IsAuthenticated() == false {
+					FTPConn.sendResponseToClient("530", "Not logged in")
+					break
+				}
 				path := command[5:]
 				size, err := FTPConn.FileSystem.GetFileSize(path)
 				if err != nil {
@@ -218,7 +244,7 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 				user := users.CheckUserName(userNameStr)
 				if user == nil {
 					Logger.Log("Command \"USER\": wrong user name!")
-					FTPConn.sendResponseToClient("430", "Wrong username or password")
+					FTPConn.sendResponseToClient("430", "Wrong username")
 					break
 				}
 				FTPConn.User = user
@@ -227,11 +253,12 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 			case "PASS":
 				pswd := command[5:]
 				if FTPConn.User == nil {
-					FTPConn.sendResponseToClient("430", "Wrong username or password")
+					FTPConn.sendResponseToClient("430", "Wrong username")
 					break
 				}
 				if FTPConn.User.CheckPswd(pswd) == false {
-					FTPConn.sendResponseToClient("430", "Wrong username or password")
+					FTPConn.sendResponseToClient("430", "Wrong password")
+					FTPConn.User = nil
 					break
 				}
 				FTPConn.sendResponseToClient("230", "")
@@ -239,6 +266,10 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 				break
 			case "PORT":
 				Logger.Log("PORT sent to Server")
+				if FTPConn.IsAuthenticated() == false {
+					FTPConn.sendResponseToClient("530", "Not logged in")
+					break
+				}
 				port := command[5:]
 				err := FTPConn.DataConnection.InitActiveConnection(port)
 				if err != nil {
@@ -247,6 +278,10 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 				}
 				FTPConn.sendResponseToClient("200", fmt.Sprint("PORT command done", FTPConn.DataConnection.FTPActiveDataConnection.DataPortAddress.String()))
 			case "RETR":
+				if FTPConn.IsAuthenticated() == false {
+					FTPConn.sendResponseToClient("530", "Not logged in")
+					break
+				}
 				fileName := command[5:]
 				file, err := FTPConn.FileSystem.RETR(fileName)
 				if err != nil {

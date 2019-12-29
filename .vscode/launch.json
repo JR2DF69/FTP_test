@@ -11,7 +11,7 @@
             "mode": "auto",
             "program": "${fileDirname}",
             "env": {},
-            "args": ["-start"]
+            "args": ["-adduser Nikita 6007130Aa /Nikita"]
         }
     ]
 }

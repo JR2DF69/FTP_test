@@ -2,6 +2,7 @@
 package ftpfs
 
 import (
+	"FTPServ/FTPAuth"
 	"FTPServ/FTPServConfig"
 	"errors"
 	"fmt"
@@ -14,10 +15,15 @@ import (
 type FileSystem struct {
 	FTPRootFolder       string
 	FTPWorkingDirectory string
+	FSUser              *FTPAuth.User
 }
 
-func (fsParams *FileSystem) InitFileSystem(config *FTPServConfig.ConfigStorage) {
+func (fsParams *FileSystem) InitFileSystem(config *FTPServConfig.ConfigStorage, user *FTPAuth.User) {
+	fsParams.FSUser = user
 	fsParams.FTPRootFolder = config.FTPRootFolder
+	if user.Folder != "/" {
+		fsParams.FTPRootFolder = fmt.Sprint(fsParams.FTPRootFolder, user.Folder)
+	}
 	lastCharIndex := len(fsParams.FTPRootFolder)
 	lastChar := fsParams.FTPRootFolder[lastCharIndex-1]
 	if lastChar == '/' {

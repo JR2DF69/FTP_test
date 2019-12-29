@@ -23,6 +23,11 @@ func main() {
 		Logger.Log("func main(): couldn't load server configuration. Run server with -rs key to reset config.json")
 		return
 	}
+	users, err := FTPAuth.LoadUsersList()
+	if err != nil {
+		Logger.Log("func main(): failed to load users configuration. Server stops now(", err, ")")
+		return
+	}
 	commandWithArgs := strings.Split(args[0], " ")
 	command := commandWithArgs[0]
 	switch command {
@@ -92,27 +97,52 @@ func main() {
 	case "-pd":
 		config.Print()
 		return
+	case "-adduser":
+		UserName := commandWithArgs[1]
+		Password := commandWithArgs[2]
+		Folder := commandWithArgs[3]
+		user := users.CheckUserName(UserName)
+		if user != nil {
+			fmt.Println("User already exist on server!")
+			return
+		}
+		if err = users.AddNewUser(UserName, Password, Folder); err != nil {
+			fmt.Println("Couldn't add new user: ", err)
+			return
+		}
+		fmt.Println("User ", UserName, " added to server and could log in.")
+	case "-rmuser":
+		UserName := commandWithArgs[1]
+		user := users.CheckUserName(UserName)
+		if user == nil {
+			fmt.Println("No user with Username ", UserName, " found on server")
+			return
+		}
+		if err = users.RemoveUser(user); err != nil {
+			fmt.Print("Remove user error: ", err)
+			return
+		}
+		fmt.Println("User ", UserName, " removed from server")
+	case "-prusers":
+		for i, usr := range users.Users {
+			fmt.Println("User ", i+1, ": User name = ", usr.UserName, ", root folder: ", usr.Folder)
+		}
 	case "-start":
 		Logger.Log("Starting server>")
-		if err != nil {
-			Logger.Log("func main(): couldn't load server configuration. Run configurator to repair config.json")
-			return
-		}
-		users, err := FTPAuth.LoadUsersList()
-		if err != nil {
-			Logger.Log("func main(): failed to load users configuration. Server stops now(", err, ")")
-			return
-		}
 		FTPServer.StartFTPServer(config.Config, users)
 	default:
 		showHelp()
 		return
 	}
 	config.SaveConfig()
+	users.Save()
 }
 func showHelp() {
 	fmt.Println("PN FTP Server Configurator commands:\r\n'-sp port_num' - set message port\r\n'-pp port_numlow-port_numhigh' - set passive mode data port range\r\n'-wd path_to_dir' - set root directory\r\n'-an (true|false) || (0|1) - set anonymous user allowed\r\n'-mp' - set num of max peers\r\n'-rs' - reset config to default\r\n'-pd' - prints config file")
 	fmt.Println("'-bs size' - set send and receive buffer size (bytes)")
 	fmt.Println("PN FTP Server users commands: \r\nUnder construction")
+	fmt.Println("'-adduser Username Password Folder' - add user with specified name, password and root folder (/ is FTP root folder)")
+	fmt.Println("'-rmuser Username' - remove specified user")
+	fmt.Println("'-prusers' - prints users list")
 	fmt.Println("Run with -start to run FTP server")
 }
