@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"time"
 )
 
 var Config *FTPServConfig.ConfigStorage
@@ -39,8 +38,6 @@ func StartFTPServer(cnfg *FTPServConfig.ConfigStorage, users *FTPAuth.Users) {
 			case ConnAddr := <-FTPConnClosedString:
 				Logger.Log("Closed connection to ", ConnAddr)
 				TCPServParameters.PeersCount--
-			case <-time.After(2 * time.Second):
-				continue
 			}
 		}
 	}()

@@ -18,24 +18,39 @@ type FileSystem struct {
 
 func (fsParams *FileSystem) InitFileSystem(config *FTPServConfig.ConfigStorage) {
 	fsParams.FTPRootFolder = config.FTPRootFolder
+	lastCharIndex := len(fsParams.FTPRootFolder)
+	lastChar := fsParams.FTPRootFolder[lastCharIndex-1]
+	if lastChar == '/' {
+		fsParams.FTPRootFolder = fsParams.FTPRootFolder[:len(fsParams.FTPRootFolder)-1]
+	}
 }
 
-func (fsParams *FileSystem) checkFTPWDForSlash() string {
-	if len(fsParams.FTPWorkingDirectory) == 0 {
+func (fsParams *FileSystem) checkForSlash(checking string) string {
+	if len(checking) == 0 {
 		return "/"
 	}
-	firstSym := fsParams.FTPWorkingDirectory[0]
+	firstSym := checking[0]
 	if firstSym != '/' {
-		return fmt.Sprint("/", fsParams.FTPWorkingDirectory)
+		return fmt.Sprint("/", checking)
 	}
-	return fsParams.FTPWorkingDirectory
+	return checking
+}
+func (fsParams *FileSystem) removeFirstSlash(checking string) string {
+	if len(checking) == 0 {
+		return checking
+	}
+	firstsym := checking[0]
+	if firstsym == '/' {
+		return checking[1:]
+	}
+	return checking
 }
 func (fsParams *FileSystem) LIST(directory string) ([]string, error) {
 	if directory == "" {
 		//using working directory
 		directory = fsParams.FTPWorkingDirectory
 	}
-	directory = fmt.Sprint(fsParams.FTPRootFolder, fsParams.checkFTPWDForSlash())
+	directory = fmt.Sprint(fsParams.FTPRootFolder, fsParams.checkForSlash(fsParams.FTPWorkingDirectory))
 	err := checkIfDir(directory)
 	if err != nil {
 		return nil, err
@@ -72,7 +87,8 @@ func checkIfDir(dirName string) error {
 	return nil
 }
 func (fsParams *FileSystem) CWD(directory string) error {
-	directoryForCheck := fmt.Sprint(fsParams.FTPRootFolder, "/", directory)
+	directory = fsParams.checkForSlash(directory)
+	directoryForCheck := fmt.Sprint(fsParams.FTPRootFolder, directory)
 	err := checkIfDir(directoryForCheck)
 	if err != nil {
 		return err
@@ -81,7 +97,8 @@ func (fsParams *FileSystem) CWD(directory string) error {
 	return nil
 }
 func (fsParams *FileSystem) RETR(fileName string) (*os.File, error) {
-	fullFileName := fmt.Sprint(fsParams.FTPRootFolder, fsParams.checkFTPWDForSlash(), fileName)
+	workingPath := fmt.Sprint(fsParams.FTPRootFolder, fsParams.checkForSlash(fsParams.FTPWorkingDirectory))
+	fullFileName := fmt.Sprint(workingPath, fsParams.removeFirstSlash(fileName))
 	fi, err := os.Stat(fullFileName)
 	if err != nil {
 		return nil, err
@@ -96,7 +113,8 @@ func (fsParams *FileSystem) RETR(fileName string) (*os.File, error) {
 	return file, nil
 }
 func (fsParams *FileSystem) GetFileSize(FileName string) (size int64, err error) {
-	fileName := fmt.Sprint(fsParams.FTPRootFolder, FileName)
+	workingPath := fmt.Sprint(fsParams.FTPRootFolder, fsParams.checkForSlash(fsParams.FTPWorkingDirectory))
+	fileName := fmt.Sprint(workingPath, fsParams.removeFirstSlash(FileName))
 	fileInfo, err := os.Stat(fileName)
 	if err != nil {
 		return 0, err

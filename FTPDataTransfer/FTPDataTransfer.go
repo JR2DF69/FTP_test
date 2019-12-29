@@ -6,8 +6,10 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 )
@@ -15,20 +17,23 @@ import (
 var config *FTPServConfig.ConfigStorage
 
 type FTPDataConnection struct {
-	DataConnectionMode       DataConnectionMode
-	ActiveDataConnection     *net.TCPConn
+	dataConnectionMode       DataConnectionMode
 	FTPPassiveDataConnection *ftpPassiveDataConnection
-	Writer                   *bufio.Writer
-	Reader                   *bufio.Reader
+	FTPActiveDataConnection  *ftpActiveDataConnection
 	TCPServerAddress         string
 	GlobalConfig             *FTPServConfig.ConfigStorage
 }
 
 type ftpPassiveDataConnection struct {
 	DataPortAddress net.TCPAddr
-	Listener        net.Listener
+	Listener        *net.TCPListener
 }
-
+type ftpActiveDataConnection struct {
+	DataPortAddress net.TCPAddr
+	Connection      *net.TCPConn
+	Writer          *bufio.Writer
+	Reader          *bufio.Reader
+}
 type DataConnectionMode uint
 
 const (
@@ -44,6 +49,30 @@ func NewConnection(serveraddr string, servconf *FTPServConfig.ConfigStorage) (*F
 	dc.TCPServerAddress = serveraddr
 	dc.GlobalConfig = servconf
 	return dc, nil
+}
+func (d *FTPDataConnection) CloseConnection() error {
+	if d.FTPPassiveDataConnection != nil {
+		if d.FTPPassiveDataConnection.Listener != nil {
+			err := d.FTPPassiveDataConnection.Listener.Close()
+			if err != nil {
+				return err
+			}
+			d.FTPPassiveDataConnection.Listener = nil
+			d.FTPPassiveDataConnection = nil
+		}
+	}
+	//close active connection
+	if d.FTPActiveDataConnection != nil {
+		if d.FTPActiveDataConnection.Connection != nil {
+			err := d.FTPActiveDataConnection.Connection.Close()
+			if err != nil {
+				return err
+			}
+			d.FTPActiveDataConnection.Connection = nil
+			d.FTPActiveDataConnection = nil
+		}
+	}
+	return nil
 }
 
 //для ответа клиенту
@@ -63,7 +92,7 @@ func (d *FTPDataConnection) GetDataPortAddress() (string, error) {
 func (d *FTPDataConnection) countPassiveConnDataPort() ([]string, error) {
 	portnum := -1
 	for i := d.GlobalConfig.DataPortLow; i <= d.GlobalConfig.DataPortHigh; i++ {
-		port, err := net.Listen("tcp", fmt.Sprint(":", i))
+		port, err := net.Listen("tcp", fmt.Sprint(d.TCPServerAddress, ":", i))
 		if err == nil {
 			port.Close()
 			portnum = i
@@ -78,20 +107,15 @@ func (d *FTPDataConnection) countPassiveConnDataPort() ([]string, error) {
 	dataPortString := []string{strconv.Itoa(int(part1)), strconv.Itoa(int(part2))}
 	return dataPortString, nil
 }
-
-/*func (DataConn *FTPDataConnection) Init(ConnectionMode DataConnectionMode, DataPort string) error {
-	DataConn.DataConnectionMode = ConnectionMode
-	if ConnectionMode == DataConnectionModeActive {
-		DataConn.parseDataPortAddr(DataPort)
-		Logger.Log(fmt.Sprint("(DataConn *FTPDataConnection) Init(ACTIVE) ACTV ADDRESS: ", DataConn.DataPortAddress))
-		return nil
-	} else if ConnectionMode == DataConnectionModePassive {
-
-		return nil
-	}
-	return nil
-}*/
 func (d *FTPDataConnection) InitPassiveConnection() (string, error) {
+	if d.FTPPassiveDataConnection != nil {
+		if d.FTPPassiveDataConnection.Listener != nil {
+			err := d.CloseConnection()
+			if err != nil {
+				return "", err
+			}
+		}
+	}
 	pportaddr, err := d.GetDataPortAddress()
 	if err != nil {
 		return "", err
@@ -101,9 +125,36 @@ func (d *FTPDataConnection) InitPassiveConnection() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	d.FTPPassiveDataConnection = ftppassconn
+	d.dataConnectionMode = DataConnectionModePassive
 	return pportaddr, ftppassconn.openConnection()
 }
-
+func (d *FTPDataConnection) InitActiveConnection(clientaddr string) error {
+	if d.FTPActiveDataConnection != nil {
+		if d.FTPActiveDataConnection.Connection != nil {
+			err := d.CloseConnection()
+			if err != nil {
+				return err
+			}
+		}
+	}
+	aportaddr, err := d.parseDataPortAddr(clientaddr)
+	if err != nil {
+		return err
+	}
+	conn, err := net.DialTCP("tcp", nil, &aportaddr)
+	if err != nil {
+		return err
+	}
+	ActiveConn := new(ftpActiveDataConnection)
+	ActiveConn.DataPortAddress = aportaddr
+	ActiveConn.Connection = conn
+	ActiveConn.Reader = bufio.NewReader(conn)
+	ActiveConn.Writer = bufio.NewWriter(conn)
+	d.FTPActiveDataConnection = ActiveConn
+	d.dataConnectionMode = DataConnectionModeActive
+	return nil
+}
 func (p *ftpPassiveDataConnection) openConnection() error {
 	fmt.Println(&p.DataPortAddress)
 	lstn, err := net.ListenTCP("tcp", &p.DataPortAddress)
@@ -132,82 +183,79 @@ func (d *FTPDataConnection) parseDataPortAddr(dataPort string) (net.TCPAddr, err
 	tcpaddr := net.TCPAddr{ip, portnum, ""}
 	return tcpaddr, nil
 }
+func (d *FTPDataConnection) TransferASCIIData(data string) error {
+	if d.dataConnectionMode == DataConnectionModePassive {
+		if d.FTPPassiveDataConnection == nil {
+			return errors.New("No passive TCP connection found for client! Type PASV to run passive mode connection")
+		}
+		if d.FTPPassiveDataConnection.Listener == nil {
+			return errors.New("No passive TCP listener found for client! Type PASV to run passive mode connection")
+		}
+		dataConn, err := d.FTPPassiveDataConnection.Listener.Accept()
+		if err != nil {
+			return err
+		}
+		writer := bufio.NewWriter(dataConn)
+		writer.Write([]byte(data))
+		writer.Write([]byte{13, 10})
+		writer.Flush()
+		dataConn.Close()
+		return d.CloseConnection()
+	}
+	if d.dataConnectionMode == DataConnectionModeActive {
+		if d.FTPActiveDataConnection == nil {
+			return errors.New("No active TCP connection found for server. Type PORT (h1,h2,h3,h4,h5,h6) to run active mode connection")
+		}
+		if d.FTPActiveDataConnection.Connection == nil {
+			return errors.New("No active TCP connection found for server. Type PORT (h1,h2,h3,h4,h5,h6) to run active mode connection")
+		}
+		d.FTPActiveDataConnection.Writer.Write([]byte(data))
+		d.FTPActiveDataConnection.Writer.Write([]byte{13, 10})
+		d.FTPActiveDataConnection.Writer.Flush()
+		return d.CloseConnection()
+	}
+	return nil
+}
+func (d *FTPDataConnection) GetBinaryFile() error {
+	return nil
+}
+func (d *FTPDataConnection) TransferBinaryFile(file *os.File) error {
+	if d.dataConnectionMode == DataConnectionModeActive {
+		if d.FTPActiveDataConnection == nil {
+			return errors.New("No FTP Data connection (mode:active)")
+		}
+		if d.FTPActiveDataConnection.Connection == nil {
+			return errors.New("TransferBinaryData: Connection not opened (mode:active)")
+		}
+		d.transferBinaryDataToConnection(file, d.FTPActiveDataConnection.Connection)
+		Logger.Log("Active connection closed")
+		return d.CloseConnection()
+	} else if d.dataConnectionMode == DataConnectionModePassive {
+		if d.FTPPassiveDataConnection == nil {
+			return errors.New("No FTP Data connection (mode:passive)")
+		}
+		if d.FTPPassiveDataConnection.Listener == nil {
+			return errors.New("TransferBinaryData: Listener not opened (mode:passive)")
+		}
+		conn, err := d.FTPPassiveDataConnection.Listener.Accept()
+		if err != nil {
+			return err
+		}
+		d.transferBinaryDataToConnection(file, conn)
+		conn.Close()
+		Logger.Log("Passive connection closed")
+		return d.CloseConnection()
+	}
 
-/*func (DataConn *FTPDataConnection) OpenConnection() error {
-	if DataConn.CheckConnectionOpened() == true {
-		return nil
-	}
-	if DataConn.DataConnectionMode == DataConnectionModeActive {
-		conn, err := net.DialTCP("tcp", nil, &DataConn.DataPortAddress)
-		if err != nil {
-			Logger.Log("(DataConn *FTPDataConnection)OpenConnection(MODE: active) DialTCP error: ", err)
-			DataConn.Connection, DataConn.Writer, DataConn.Reader, DataConn.Listener = nil, nil, nil, nil
-			return err
-		}
-		DataConn.Connection = conn
-		DataConn.Listener = nil
-		DataConn.Writer = bufio.NewWriter(DataConn.Connection)
-		DataConn.Reader = bufio.NewReader(DataConn.Reader)
-		/*writer := bufio.NewWriter(listDialer)
-		for _, line := range listing {
-			writeMessageToWriter(fmt.Sprint(line, "\r\n"), writer)
-		}
-		listDialer.Close()
-	} else if DataConn.DataConnectionMode == DataConnectionModePassive {
-		//OpenDataPort(&connParams)
-		Listener, err := net.ListenTCP("tcp", &DataConn.DataPortAddress)
-		if err != nil {
-			Logger.Log("(DataConn *FTPDataConnection)OpenConnection(MODE: passive) ListenTCP error: ", err)
-			DataConn.Connection, DataConn.Writer, DataConn.Reader, DataConn.Listener = nil, nil, nil, nil
-			return err
-		}
-		DataConn.Listener = Listener
-	}
 	return nil
 }
-func (DataConn *FTPDataConnection) CheckConnectionOpened() bool {
-	if DataConn.DataConnectionMode == DataConnectionModeActive {
-		if DataConn.Connection != nil {
-			return true
+func (d *FTPDataConnection) transferBinaryDataToConnection(file *os.File, conn net.Conn) {
+	sendFileBuff := make([]byte, d.GlobalConfig.BufferSize)
+	for {
+		_, err := file.Read(sendFileBuff)
+		if err == io.EOF {
+			break
 		}
-	} else if DataConn.DataConnectionMode == DataConnectionModePassive {
-		if DataConn.Listener != nil {
-			return true
-		}
+		conn.Write(sendFileBuff)
 	}
-	return false
 }
-func (DataConn *FTPDataConnection) CloseConnection() error {
-	if DataConn.PassiveModeDataConn != nil {
-		DataConn.PassiveModeDataConn.Close()
-	}
-	if DataConn.Listener != nil {
-		DataConn.Listener.Close()
-	}
-	if DataConn.Connection != nil {
-		DataConn.Connection.Close()
-	}
-	DataConn.PassiveModeDataConn, DataConn.Connection, DataConn.Writer, DataConn.Reader, DataConn.Listener = nil, nil, nil, nil, nil
-	Logger.Log("(DataConn *FTPDataConnection) CloseConnection(): all connection were closed")
-	return nil
-}
-func (DataConn *FTPDataConnection) sendBinaryData(dataBytes []byte) error {
-	/*if DataConn.CheckConnectionOpened() == false {
-		DataConn.OpenConnection()
-	}
-	if DataConn.DataConnectionMode == DataConnectionModeActive {
-		DataConn.Connection.Write(dataBytes)
-	} else if DataConn.DataConnectionMode == DataConnectionModePassive {
-		if DataConn.PassiveModeDataConn != nil {
-			DataConn.PassiveModeDataConn.Write(dataBytes)
-			return nil
-		}
-		conn, err := DataConn.Listener.Accept()
-		if err != nil {
-			return err
-		}
-		conn.Write(dataBytes)
-		DataConn.PassiveModeDataConn = conn
-	}
-	return nil
-}*/

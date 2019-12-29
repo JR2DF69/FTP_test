@@ -1,1 +1,1 @@
-{"Port":4010,"Anonymous":true,"FTPRootFolder":"/Users/panovnm","DataPortLow":4501,"DataPortHigh":4800,"MaxClientValue":200,"BufferSize":0}
+{"Port":4010,"Anonymous":false,"FTPRootFolder":"/Users/panovnm","DataPortLow":4200,"DataPortHigh":4500,"MaxClientValue":100,"BufferSize":1024}

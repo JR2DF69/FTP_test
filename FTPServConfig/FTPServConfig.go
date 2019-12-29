@@ -33,13 +33,18 @@ func LoadConfig() (config *ConfigStorage, err error) {
 		return nil, err
 	}
 	config = cfg.Config
+	config.BufferSize = 8192
 	return config, nil
 }
 func (c *Configurator) Print() {
 	fmt.Println("Dataport = ", c.Config.DataPortLow, "-", c.Config.DataPortHigh, "\r\nPort = ", c.Config.Port, "\r\nMax peers = ", c.Config.MaxClientValue, "\r\nAllow anonymous = ", c.Config.Anonymous, "\r\nRoot folder = ", c.Config.FTPRootFolder, "\r\n")
+	fmt.Println("BufferSize = ", c.Config.BufferSize)
 }
 func (c *Configurator) SetAnonymous(value bool) {
 	c.Config.Anonymous = value
+}
+func (c *Configurator) SetBufferSize(newSize int) {
+	c.Config.BufferSize = newSize
 }
 func ReadConfig() (*Configurator, error) {
 	file, err := os.Open("config.json")

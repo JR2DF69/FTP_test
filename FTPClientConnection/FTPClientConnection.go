@@ -59,6 +59,8 @@ func (FTPConn *FTPConnection) sendResponseToClient(command string, comment inter
 	switch command {
 	case "200":
 		FTPConn.writeMessageToWriter(fmt.Sprint("200 ", comment))
+	case "211":
+		FTPConn.writeMessageToWriter(fmt.Sprint("211", comment))
 	case "215":
 		FTPConn.writeMessageToWriter(fmt.Sprint("215 ", "LINUX"))
 	case "220":
@@ -79,15 +81,24 @@ func (FTPConn *FTPConnection) sendResponseToClient(command string, comment inter
 	return nil
 }
 
-func (FTPConn *FTPConnection) CloseConnection() error {
+func (FTPConn *FTPConnection) CloseConnection(TCPClosed bool) error {
 	//close DataConnection
 	//FTPConn.DataConnection.CloseConnection()
 	//check Connection closed
-	if FTPConn.TCPConn != nil {
-		FTPConn.TCPConn.Close()
-		FTPConn.FTPConnClosedString <- FTPConn.TCPConn.RemoteAddr().String()
-		FTPConn.TCPConn = nil
+	_ = 1
+	fmt.Print("Closing connection...")
+	if FTPConn.DataConnection != nil {
+		FTPConn.DataConnection.CloseConnection()
+		FTPConn.DataConnection = nil
 	}
+	FTPConn.FTPConnClosedString <- FTPConn.TCPConn.RemoteAddr().String()
+	if FTPConn.TCPConn != nil {
+		err := FTPConn.TCPConn.Close()
+		if err == nil {
+			FTPConn.TCPConn = nil
+		}
+	}
+	Logger.Log("Connection closed")
 	return nil
 }
 
@@ -98,7 +109,7 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 		_, err := FTPConn.Reader.Read(reader)
 		if err != nil {
 			Logger.Log("parseIncomingConnection, Conn.Read error: ", err, "\r\nConnection closed.")
-			FTPConn.CloseConnection()
+			//FTPConn.CloseConnection(false)
 			return
 		}
 		reader = bytes.Trim(reader, "\x00")
@@ -147,46 +158,25 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 			fourSymbolCommand := command[:4]
 			switch string(fourSymbolCommand) {
 			case "FEAT":
-				FTPConn.sendResponseToClient("211", "-Server feature:\r\n SIZE\r\n211 End")
+				FTPConn.sendResponseToClient("211", "-Server feature:\r\n SIZE\r\n211 END")
 			case "LIST":
-				/*listing, err := FTPConn.FileSystem.LIST("")
+				listing, err := FTPConn.FileSystem.LIST("")
 				if err != nil {
 					if err.Error() == "Not a dir" {
 						FTPConn.sendResponseToClient("550", "Not a directory")
 						break
 					}
 				}
-				if FTPConn.DataConnection.OpenConnection() != nil {
-
-				}
 				FTPConn.sendResponseToClient("150", "Here comes the directory listing")
-				if FTPConn.DataConnection.DataConnectionMode == DataConnectionModeActive {
-					{
-						for _, list := range listing {
-							FTPConn.DataConnection.Writer.Write([]byte(fmt.Sprint(list, "\r\n")))
-							FTPConn.DataConnection.Writer.Flush()
-						}
-						FTPConn.sendResponseToClient("226", "Directory sent OK")
-						FTPConn.DataConnection.CloseConnection()
-						break
-					}
-				} else if FTPConn.DataConnection.DataConnectionMode == DataConnectionModePassive {
-					conn, err := FTPConn.DataConnection.Listener.Accept()
-					if err != nil {
-						FTPConn.sendResponseToClient("550", "Could not send data")
-						break
-					}
-					writer := bufio.NewWriter(conn)
-					for _, line := range listing {
-						writer.Write([]byte(fmt.Sprint(line, "\r\n")))
-						writer.Flush()
-					}
-					FTPConn.sendResponseToClient("226", "Directory sent OK")
-					conn.Close()
-					conn = nil
-					FTPConn.DataConnection.CloseConnection()
+				sendingdir := strings.Join(listing, "\r\n")
+				err = FTPConn.DataConnection.TransferASCIIData(sendingdir)
+				if err != nil {
+					FTPConn.sendResponseToClient("550", "Could not send data")
+					Logger.Log("Couln't send LIST data: ", err)
 					break
 				}
+				FTPConn.sendResponseToClient("226", "Directory sent OK")
+				break
 				//send error message*/
 			case "PASV":
 				passPortAddress, err := FTPConn.DataConnection.InitPassiveConnection()
@@ -207,6 +197,7 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 					FTPConn.sendResponseToClient("550", "Could not get file size")
 					break
 				}
+				Logger.Log(size)
 				FTPConn.sendResponseToClient("213", size)
 			case "USER":
 				//new user
@@ -217,7 +208,7 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 					Logger.Log("This is anonymous!")
 					if FTPConn.GlobalConfig.Anonymous == false {
 						FTPConn.sendResponseToClient("530", "")
-						FTPConn.CloseConnection()
+						//FTPConn.CloseConnection()
 						break
 					} else {
 						FTPConn.sendResponseToClient("230", "")
@@ -248,11 +239,15 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 				break
 			case "PORT":
 				Logger.Log("PORT sent to Server")
-				/*Port := command[5:]
-				FTPConn.DataConnection.Init(DataConnectionModeActive, Port)
-				FTPConn.sendResponseToClient("200", fmt.Sprint("PORT command done", FTPConn.DataConnection.DataPortAddress))*/
+				port := command[5:]
+				err := FTPConn.DataConnection.InitActiveConnection(port)
+				if err != nil {
+					FTPConn.sendResponseToClient("550", fmt.Sprint("Dialing active port error: ", err))
+					break
+				}
+				FTPConn.sendResponseToClient("200", fmt.Sprint("PORT command done", FTPConn.DataConnection.FTPActiveDataConnection.DataPortAddress.String()))
 			case "RETR":
-				/*fileName := command[5:]
+				fileName := command[5:]
 				file, err := FTPConn.FileSystem.RETR(fileName)
 				if err != nil {
 					Logger.Log("RETR Command, fsRETR error: ", err)
@@ -260,27 +255,19 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 					break
 				}
 				FTPConn.sendResponseToClient("150", fmt.Sprint("Opening binary stream for", fileName))
-				sendFileBuff := make([]byte, config.BufferSize)
-				for {
-					_, err := file.Read(sendFileBuff)
-					if err == io.EOF {
-						break
-					}
-					err = FTPConn.DataConnection.sendBinaryData(sendFileBuff)
-					if err != nil {
-						Logger.Log("RETR Command, File transfer error: ", err)
-						FTPConn.sendResponseToClient("550", "File transfer error")
-						break
-					}
+				err = FTPConn.DataConnection.TransferBinaryFile(file)
+				if err != nil {
+					Logger.Log("RETR command error: ", err)
+					FTPConn.sendResponseToClient("550", "File transfer error")
+					break
 				}
-				FTPConn.DataConnection.CloseConnection()
-				FTPConn.sendResponseToClient("226", "Transfer complete")*/
+				FTPConn.sendResponseToClient("226", "Transfer complete")
 			case "SYST":
 				FTPConn.sendResponseToClient("215", runtime.GOOS)
 			case "QUIT":
 				Logger.Log("Closing connection")
-				FTPConn.CloseConnection()
-				break
+				FTPConn.CloseConnection(true)
+				return
 			}
 		}
 	}
