@@ -2,10 +2,13 @@ package FTPDataTransfer
 
 import (
 	"FTPServ/FTPServConfig"
+	"FTPServ/FTPtls"
 	"FTPServ/Logger"
 	"bufio"
+	"crypto/tls"
 	"errors"
 	"fmt"
+	"github.com/cheggaaa/pb"
 	"io"
 	"math"
 	"net"
@@ -22,17 +25,24 @@ type FTPDataConnection struct {
 	FTPActiveDataConnection  *ftpActiveDataConnection
 	TCPServerAddress         string
 	GlobalConfig             *FTPServConfig.ConfigStorage
+	DataTranserAbort         bool
+	UsingTLS                 bool
+	TLSConfig                *FTPtls.FTPTLSServerParameters
 }
 
 type ftpPassiveDataConnection struct {
 	DataPortAddress net.TCPAddr
-	Listener        *net.TCPListener
+	Listener        net.Listener
+	UsingTLS        bool
+	TLSConfig       *FTPtls.FTPTLSServerParameters
 }
 type ftpActiveDataConnection struct {
 	DataPortAddress net.TCPAddr
 	Connection      *net.TCPConn
 	Writer          *bufio.Writer
 	Reader          *bufio.Reader
+	UsingTLS        bool
+	TLSConfig       *FTPtls.FTPTLSServerParameters
 }
 type DataConnectionMode uint
 
@@ -41,6 +51,9 @@ const (
 	DataConnectionModePassive                    = iota
 )
 
+func (d *FTPDataConnection) DataConnectionsClosed() bool {
+	return d.FTPPassiveDataConnection == nil && d.FTPActiveDataConnection == nil
+}
 func NewConnection(serveraddr string, servconf *FTPServConfig.ConfigStorage) (*FTPDataConnection, error) {
 	if serveraddr == "" || servconf == nil {
 		return nil, errors.New("NewDataConnection: wrong parameters")
@@ -120,13 +133,15 @@ func (d *FTPDataConnection) InitPassiveConnection() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	Logger.Log(fmt.Sprint("(DataConn *FTPDataConnection) Init(PASSIVE) PASV ADDRESS: ", pportaddr))
 	ftppassconn, err := d.initPassiveConnection(pportaddr)
 	if err != nil {
 		return "", err
 	}
 	d.FTPPassiveDataConnection = ftppassconn
+	d.FTPPassiveDataConnection.UsingTLS = d.UsingTLS
+	d.FTPPassiveDataConnection.TLSConfig = d.TLSConfig
 	d.dataConnectionMode = DataConnectionModePassive
+	Logger.Log(fmt.Sprint("(DataConn *FTPDataConnection) Init(PASSIVE) PASV ADDRESS: ", pportaddr))
 	return pportaddr, ftppassconn.openConnection()
 }
 func (d *FTPDataConnection) InitActiveConnection(clientaddr string) error {
@@ -157,7 +172,10 @@ func (d *FTPDataConnection) InitActiveConnection(clientaddr string) error {
 }
 func (p *ftpPassiveDataConnection) openConnection() error {
 	fmt.Println(&p.DataPortAddress)
-	lstn, err := net.ListenTCP("tcp", &p.DataPortAddress)
+	lstn, err := net.Listen("tcp", p.DataPortAddress.String())
+	if p.UsingTLS {
+		lstn = tls.NewListener(lstn, p.TLSConfig.TLSConfig)
+	}
 	if err != nil {
 		return err
 	}
@@ -212,14 +230,49 @@ func (d *FTPDataConnection) TransferASCIIData(data string) error {
 		d.FTPActiveDataConnection.Writer.Write([]byte(data))
 		d.FTPActiveDataConnection.Writer.Write([]byte{13, 10})
 		d.FTPActiveDataConnection.Writer.Flush()
-		return d.CloseConnection()
+		return nil
 	}
 	return nil
 }
 func (d *FTPDataConnection) GetBinaryFile() error {
 	return nil
 }
+func (d *FTPDataConnection) ReceiveBinaryFile(fileName string) error {
+	if err := d.CheckIfConnectionOpened(); err != nil {
+		return err
+	}
+	defer d.CloseConnection()
+	if d.dataConnectionMode == DataConnectionModeActive {
+	} else if d.dataConnectionMode == DataConnectionModePassive {
+		conn, err := d.FTPPassiveDataConnection.Listener.Accept()
+		if err != nil {
+			return err
+		}
+		defer conn.Close()
+		d.receiveBinaryData(fileName, conn)
+	}
+	return nil
+}
 func (d *FTPDataConnection) TransferBinaryFile(file *os.File) error {
+	if err := d.CheckIfConnectionOpened(); err != nil {
+		return err
+	}
+	defer d.CloseConnection()
+	if d.dataConnectionMode == DataConnectionModeActive {
+		d.transferBinaryDataToConnection(file, d.FTPActiveDataConnection.Connection)
+		return nil
+	} else if d.dataConnectionMode == DataConnectionModePassive {
+		conn, err := d.FTPPassiveDataConnection.Listener.Accept()
+		defer conn.Close()
+		if err != nil {
+			return err
+		}
+		d.transferBinaryDataToConnection(file, conn)
+		return nil
+	}
+	return nil
+}
+func (d *FTPDataConnection) CheckIfConnectionOpened() error {
 	if d.dataConnectionMode == DataConnectionModeActive {
 		if d.FTPActiveDataConnection == nil {
 			return errors.New("No FTP Data connection (mode:active)")
@@ -227,9 +280,6 @@ func (d *FTPDataConnection) TransferBinaryFile(file *os.File) error {
 		if d.FTPActiveDataConnection.Connection == nil {
 			return errors.New("TransferBinaryData: Connection not opened (mode:active)")
 		}
-		d.transferBinaryDataToConnection(file, d.FTPActiveDataConnection.Connection)
-		Logger.Log("Active connection closed")
-		return d.CloseConnection()
 	} else if d.dataConnectionMode == DataConnectionModePassive {
 		if d.FTPPassiveDataConnection == nil {
 			return errors.New("No FTP Data connection (mode:passive)")
@@ -237,25 +287,64 @@ func (d *FTPDataConnection) TransferBinaryFile(file *os.File) error {
 		if d.FTPPassiveDataConnection.Listener == nil {
 			return errors.New("TransferBinaryData: Listener not opened (mode:passive)")
 		}
-		conn, err := d.FTPPassiveDataConnection.Listener.Accept()
-		if err != nil {
-			return err
-		}
-		d.transferBinaryDataToConnection(file, conn)
-		conn.Close()
-		Logger.Log("Passive connection closed")
-		return d.CloseConnection()
 	}
-
 	return nil
 }
 func (d *FTPDataConnection) transferBinaryDataToConnection(file *os.File, conn net.Conn) {
 	sendFileBuff := make([]byte, d.GlobalConfig.BufferSize)
+	stats, _ := file.Stat()
+	size := stats.Size()
+	progressbar := pb.StartNew(int(size))
+	progress := 0
 	for {
-		_, err := file.Read(sendFileBuff)
+		if d.DataTranserAbort {
+			d.DataTranserAbort = false
+			Logger.Log("Data transfer aborted")
+			progressbar.Finish()
+			return
+		}
+		count, err := file.Read(sendFileBuff)
+		progress += count
+		progressbar.Set(progress)
 		if err == io.EOF {
+			progressbar.Finish()
+			Logger.Log("Data transfer completed, total ", progress, " bytes")
 			break
 		}
 		conn.Write(sendFileBuff)
+	}
+}
+func (d *FTPDataConnection) receiveBinaryData(fileName string, conn net.Conn) error {
+	receiveBuffer := make([]byte, d.GlobalConfig.BufferSize)
+	Logger.Log("Receiving data from ", conn.RemoteAddr().String(), "...")
+	file, err := os.OpenFile(fileName, os.O_APPEND|os.O_WRONLY, os.ModeAppend)
+	if err != nil {
+		Logger.Log("Can't open source file for edit: ", err)
+		return err
+	}
+	writer := bufio.NewWriter(file)
+	received := 0
+	for {
+		if d.DataTranserAbort {
+			d.DataTranserAbort = false
+			Logger.Log("Data transfer aborted")
+			return nil
+		}
+		rec, err := conn.Read(receiveBuffer)
+		if err == nil {
+			writer.Write(receiveBuffer[:rec])
+			received += rec
+			fmt.Printf("\rReceiving data, received %d bytes", received)
+		} else {
+			err := writer.Flush()
+			if err != nil {
+				Logger.Log("Data receiving error: ", err)
+				file.Close()
+				return err
+			}
+			fmt.Printf("\r\n")
+			Logger.Log("Data received, total ", received, " bytes")
+			return nil
+		}
 	}
 }

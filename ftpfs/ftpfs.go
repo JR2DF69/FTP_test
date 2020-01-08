@@ -17,7 +17,50 @@ type FileSystem struct {
 	FTPWorkingDirectory string
 	FSUser              *FTPAuth.User
 }
+type RenameableObj struct {
+	OldName string
+	NewName string
+}
 
+func (fsParams *FileSystem) NewRenameableObj(path string) (*RenameableObj, error) {
+	if len(path) == 0 {
+		return nil, errors.New("No dir name specified")
+	}
+	fullpath := fmt.Sprint(fsParams.FTPRootFolder, fsParams.checkForSlash(path))
+	_, err := os.Stat(fullpath)
+	if err != nil {
+		return nil, err
+	}
+	return &RenameableObj{OldName: fullpath, NewName: ""}, nil
+}
+func (fsParams *FileSystem) Rename(RenameProps *RenameableObj) error {
+	if len(RenameProps.OldName) == 0 {
+		return errors.New("No old name specified")
+	}
+	if len(RenameProps.NewName) == 0 {
+		return errors.New("No new name specified")
+	}
+	newPath := fmt.Sprint(fsParams.FTPRootFolder, fsParams.checkForSlash(RenameProps.NewName))
+	err := os.Rename(RenameProps.OldName, newPath)
+	return err
+}
+func (fsParams *FileSystem) STOR(path string) (*os.File, error) {
+	if len(path) == 0 {
+		return nil, errors.New("No fileName specified")
+	}
+	filePath := fmt.Sprint(fsParams.FTPRootFolder, fsParams.checkForSlash(path))
+	//check if file exist
+	_, err := os.Stat(filePath)
+	if err == nil {
+		return nil, errors.New("File exist in specified path")
+	}
+	file, err := os.Create(filePath)
+	if err != nil {
+		return nil, err
+	}
+	file.Close()
+	return file, nil
+}
 func (fsParams *FileSystem) InitFileSystem(config *FTPServConfig.ConfigStorage, user *FTPAuth.User) {
 	fsParams.FSUser = user
 	fsParams.FTPRootFolder = config.FTPRootFolder
@@ -51,17 +94,28 @@ func (fsParams *FileSystem) removeFirstSlash(checking string) string {
 	}
 	return checking
 }
+func (fsParams *FileSystem) MakeDir(dirName string) error {
+	if len(dirName) == 0 {
+		return errors.New("No dir name specified")
+	}
+	dirPath := fsParams.FTPRootFolder + fsParams.checkForSlash(dirName)
+	err := os.Mkdir(dirPath, os.ModePerm.Perm())
+	return err
+}
+func (fsParams *FileSystem) getFullDirectoryPath() string {
+	return fmt.Sprint(fsParams.FTPRootFolder, fsParams.checkForSlash(fsParams.FTPWorkingDirectory))
+}
 func (fsParams *FileSystem) LIST(directory string) ([]string, error) {
-	if directory == "" {
+	if len(directory) == 0 {
 		//using working directory
 		directory = fsParams.FTPWorkingDirectory
 	}
-	directory = fmt.Sprint(fsParams.FTPRootFolder, fsParams.checkForSlash(fsParams.FTPWorkingDirectory))
+	directory = fmt.Sprint(fsParams.FTPRootFolder, fsParams.checkForSlash(directory))
 	err := checkIfDir(directory)
 	if err != nil {
 		return nil, err
 	}
-	lsOutput, err := executeShellCommands("ls", "-ltr", directory)
+	lsOutput, err := executeShellCommands("ls", "-l", directory)
 	if err != nil {
 		return nil, err
 	}
@@ -73,14 +127,40 @@ func (fsParams *FileSystem) LIST(directory string) ([]string, error) {
 			if strings.ToLower(firstFive) == "total" {
 				continue
 			}
+			add := line[10]
+			if add == '@' || add == '+' {
+				lineRune := []rune(line)
+				lineRune[10] = rune(' ')
+				line = string(lineRune)
+			}
 		} else {
 			continue
 		}
 		outputString = fmt.Sprint(outputString, "\r\n", line)
-		fmt.Println(line)
 	}
 	outputArray := strings.Split(outputString, "\r\n")
 	return outputArray, nil
+}
+func (fsParams *FileSystem) STAT(directory string) (string, error) {
+	if directory == "" {
+		directory = fsParams.FTPWorkingDirectory
+	}
+	directory = fmt.Sprint(fsParams.FTPRootFolder, fsParams.checkForSlash(fsParams.FTPWorkingDirectory))
+	err := checkIfDir(directory)
+	if err != nil {
+		return "", err
+	}
+	statOutput, err := executeShellCommands("stat", "-ltr", directory)
+	if err != nil {
+		return "", err
+	}
+	add := statOutput[10]
+	if add == '@' || add == '+' {
+		lineRune := []rune(statOutput)
+		lineRune[10] = rune(' ')
+		statOutput = string(lineRune)
+	}
+	return statOutput, nil
 }
 func checkIfDir(dirName string) error {
 	dirStat, err := os.Stat(dirName)
@@ -103,8 +183,8 @@ func (fsParams *FileSystem) CWD(directory string) error {
 	return nil
 }
 func (fsParams *FileSystem) RETR(fileName string) (*os.File, error) {
-	workingPath := fmt.Sprint(fsParams.FTPRootFolder, fsParams.checkForSlash(fsParams.FTPWorkingDirectory))
-	fullFileName := fmt.Sprint(workingPath, fsParams.removeFirstSlash(fileName))
+	workingPath := fsParams.checkForSlash(fsParams.FTPRootFolder)
+	fullFileName := fmt.Sprint(workingPath, "/", fsParams.removeFirstSlash(fileName))
 	fi, err := os.Stat(fullFileName)
 	if err != nil {
 		return nil, err

@@ -4,7 +4,9 @@ import (
 	"FTPServ/FTPAuth"
 	"FTPServ/FTPClientConnection"
 	"FTPServ/FTPServConfig"
+	"FTPServ/FTPtls"
 	"FTPServ/Logger"
+	//"FTPServ/CBModule"
 	"errors"
 	"fmt"
 	"net"
@@ -17,34 +19,59 @@ var TCPServParameters *TCPServer
 
 type TCPServer struct {
 	ServerAddress net.TCPAddr
-	Listener      *net.TCPListener
+	Listener      net.Listener
 	PeersCount    int
+	TLSConfig     *FTPtls.FTPTLSServerParameters
 }
 
-func StartFTPServer(cnfg *FTPServConfig.ConfigStorage, users *FTPAuth.Users) {
+func StartFTPServer(cnfg *FTPServConfig.ConfigStorage, users *FTPAuth.Users, stopCh chan bool) {
 	Config = cnfg
 	TCPServParameters = new(TCPServer)
-	err := createTCPSocket()
+	//для сообщения серверу, что соединение закрыто
+	FTPConnClosedString := make(chan string)
+	//generate config for server
+	params, err := FTPtls.ReadNewTLSConfig()
+	if err != nil {
+		Logger.Log("Parse tls config error: ", err)
+	} else {
+		Logger.Log("TLS config loaded successfully. Clients can use AUTH command for TLS connection!")
+		TCPServParameters.TLSConfig = params
+	}
+	err = createTCPSocket()
 	if err != nil {
 		Logger.Log("func main(): ", err, ". Server stops now")
 		os.Exit(1)
 	}
-	//для сообщения серверу, что соединение закрыто
-	FTPConnClosedString := make(chan string)
+	/*if err = CBModule.InitNewConnection(); err != nil{
+		Logger.Log("Error while initializing CB bridge: ", err)
+	}*/
 	//это диспетчер подключений к серверу. Он отслеживает закрытие соединений и контролирует число подключений
+	//также через него отслеживаем команды об остановке сервера
 	go func() {
 		for {
 			select {
 			case ConnAddr := <-FTPConnClosedString:
 				Logger.Log("Closed connection to ", ConnAddr)
 				TCPServParameters.PeersCount--
+			case StopServer := <-stopCh:
+				if StopServer {
+					Logger.Log("Stopping server...")
+					return
+				}
 			}
 		}
 	}()
+	defer TCPServParameters.Listener.Close()
 	//бесконечно пытаемся поймать входящее соединение
 	for {
 		//а вот и оно
-		conn, err := TCPServParameters.Listener.AcceptTCP()
+		/*select {
+		case StopServer := <-stopCh:
+			if StopServer {
+				return
+			}
+		}*/
+		conn, err := TCPServParameters.Listener.Accept()
 		if err != nil {
 			Logger.Log("Connection Listener error: ", err, ". Ignoring connection...")
 			continue
@@ -54,7 +81,12 @@ func StartFTPServer(cnfg *FTPServConfig.ConfigStorage, users *FTPAuth.Users) {
 			conn.Close()
 			continue
 		}
-		FTPConn, err := FTPClientConnection.InitConnection(conn, TCPServParameters.ServerAddress.IP.String(), FTPConnClosedString, Config, users)
+		/*err = TLSConn.Handshake()
+		if err != nil {
+			Logger.Log("Handshake error: ", err)
+		}*/
+		//TLSConn.Write([]byte("220 Welcome"))
+		FTPConn, err := FTPClientConnection.InitConnection(conn, TCPServParameters.ServerAddress.IP.String(), FTPConnClosedString, Config, users, TCPServParameters.TLSConfig)
 		if err != nil {
 			Logger.Log("Init new connection error: ", err)
 			FTPConn = nil
@@ -73,11 +105,13 @@ func createTCPSocket() error {
 	}
 	TCPServParameters.ServerAddress = net.TCPAddr{ipaddr, Config.Port, ""}
 	Logger.Log(fmt.Sprint("Opening TCP socket at: ", TCPServParameters.ServerAddress))
-	TCPServParameters.Listener, err = net.ListenTCP("tcp", &TCPServParameters.ServerAddress)
+	Listener, err := net.Listen("tcp4", TCPServParameters.ServerAddress.String())
 	if err != nil {
-		Logger.Log(fmt.Sprint("GetMachineIPAddress returns error: ", err))
+		Logger.Log("Error to listen to TCP: ", err)
 		return errors.New("There was an error while opening TCP Socket")
 	}
+	TCPServParameters.Listener = Listener
+	//TCPServParameters.Listener = tls.NewListener(Listener, TCPServParameters.TLSConfig)
 	Logger.Log(fmt.Sprint("FTP Server running at: ", TCPServParameters.ServerAddress, "\nWaiting for incoming connections..."))
 	return nil
 }

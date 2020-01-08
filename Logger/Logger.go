@@ -10,5 +10,5 @@ import (
 //args are the arguments for log
 func Log(args ...interface{}) {
 	timeNow := time.Now()
-	fmt.Println(timeNow, ":", args)
+	fmt.Println(timeNow, " : ", args)
 }

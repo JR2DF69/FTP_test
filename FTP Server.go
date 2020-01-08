@@ -28,11 +28,19 @@ func main() {
 		Logger.Log("func main(): failed to load users configuration. Server stops now(", err, ")")
 		return
 	}
-	commandWithArgs := strings.Split(args[0], " ")
-	command := commandWithArgs[0]
+	argsString := strings.Join(args, " ")
+	command := argsString[0:3]
+	stopServer := make(chan bool)
+	if len(command) < 4 && !(command != "-rs" || command != "-rd") {
+		showHelp()
+		return
+	}
+	if command == "-st" {
+		command = "-start"
+	}
 	switch command {
 	case "-sp":
-		value, err := strconv.Atoi(commandWithArgs[1])
+		value, err := strconv.Atoi(argsString[4:])
 		if err != nil {
 			fmt.Println(err)
 			return
@@ -48,8 +56,14 @@ func main() {
 		}
 		fmt.Println("Port set to: ", config.Config.Port)
 	case "-pp":
-		port1, err := strconv.Atoi(commandWithArgs[1])
-		port2, err2 := strconv.Atoi(commandWithArgs[2])
+		ports := strings.Split(argsString[4:], "-")
+		if len(ports) != 2 {
+			fmt.Println("Wrong portrange sent to set")
+			showHelp()
+			return
+		}
+		port1, err := strconv.Atoi(ports[0])
+		port2, err2 := strconv.Atoi(ports[1])
 		if (err != nil) || (err2 != nil) {
 			fmt.Println("Wrong portnums to set dataport range!")
 			showHelp()
@@ -69,7 +83,7 @@ func main() {
 		}
 		fmt.Println("Passive data port set to: ", config.Config.DataPortLow, "-", config.Config.DataPortHigh)
 	case "-an":
-		value, err := strconv.ParseBool(commandWithArgs[1])
+		value, err := strconv.ParseBool(argsString[4:])
 		if err != nil {
 			fmt.Println(err)
 			return
@@ -77,7 +91,7 @@ func main() {
 		config.SetAnonymous(value)
 		fmt.Println("Anonymous set to: ", config.Config.Anonymous)
 	case "-wd":
-		value := commandWithArgs[1]
+		value := argsString[4:]
 		if err = config.SetHomeDir(value); err != nil {
 			fmt.Println("Setting home dir error: ", err)
 		}
@@ -87,7 +101,7 @@ func main() {
 		fmt.Println("Loaded default server configuration")
 		return
 	case "-bs":
-		value, err := strconv.Atoi(commandWithArgs[1])
+		value, err := strconv.Atoi(argsString[4:])
 		if err != nil {
 			fmt.Println("Couldn't set buffer size: ", err)
 			return
@@ -98,9 +112,15 @@ func main() {
 		config.Print()
 		return
 	case "-adduser":
-		UserName := commandWithArgs[1]
-		Password := commandWithArgs[2]
-		Folder := commandWithArgs[3]
+		userParams := strings.Split(argsString[4:], " ")
+		if len(userParams) != 3 {
+			fmt.Println("Wrong new user params!")
+			showHelp()
+			return
+		}
+		UserName := userParams[0]
+		Password := userParams[1]
+		Folder := userParams[2]
 		user := users.CheckUserName(UserName)
 		if user != nil {
 			fmt.Println("User already exist on server!")
@@ -112,7 +132,7 @@ func main() {
 		}
 		fmt.Println("User ", UserName, " added to server and could log in.")
 	case "-rmuser":
-		UserName := commandWithArgs[1]
+		UserName := argsString[4:]
 		user := users.CheckUserName(UserName)
 		if user == nil {
 			fmt.Println("No user with Username ", UserName, " found on server")
@@ -129,7 +149,16 @@ func main() {
 		}
 	case "-start":
 		Logger.Log("Starting server>")
-		FTPServer.StartFTPServer(config.Config, users)
+		go FTPServer.StartFTPServer(config.Config, users, stopServer)
+		readln := ""
+		for {
+			fmt.Scanln(&readln)
+			if strings.ToLower(readln) == "exit" {
+				fmt.Println("Stopping server...")
+				stopServer <- true
+				break
+			}
+		}
 	default:
 		showHelp()
 		return
@@ -138,7 +167,7 @@ func main() {
 	users.Save()
 }
 func showHelp() {
-	fmt.Println("PN FTP Server Configurator commands:\r\n'-sp port_num' - set message port\r\n'-pp port_numlow-port_numhigh' - set passive mode data port range\r\n'-wd path_to_dir' - set root directory\r\n'-an (true|false) || (0|1) - set anonymous user allowed\r\n'-mp' - set num of max peers\r\n'-rs' - reset config to default\r\n'-pd' - prints config file")
+	fmt.Println("PN FTP Server Configurator commands:\r\n'-sp port_num' - set message port\r\n'-pp port_numlow port_numhigh' - set passive mode data port range\r\n'-wd path_to_dir' - set root directory\r\n'-an (true|false) || (0|1) - set anonymous user allowed\r\n'-mp' - set num of max peers\r\n'-rs' - reset config to default\r\n'-pd' - prints config file")
 	fmt.Println("'-bs size' - set send and receive buffer size (bytes)")
 	fmt.Println("PN FTP Server users commands: \r\nUnder construction")
 	fmt.Println("'-adduser Username Password Folder' - add user with specified name, password and root folder (/ is FTP root folder)")

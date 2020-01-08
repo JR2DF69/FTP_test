@@ -80,7 +80,6 @@ func (U *Users) Save() error {
 	if err != nil {
 		return errors.New(fmt.Sprint("func SaveUsers() error: ", err))
 	}
-	fmt.Println(U.usersFile.Name())
 	ioutil.WriteFile(U.usersFile.Name(), output, os.ModeAppend)
 	U.usersFile.Close()
 	return err
