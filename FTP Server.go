@@ -38,15 +38,15 @@ func main() {
 	if command == "-st" {
 		command = "-start"
 	}
+	if command == "-ss" {
+		command = "-sstart"
+	}
 	switch command {
 	case "-sp":
 		value, err := strconv.Atoi(argsString[4:])
 		if err != nil {
 			fmt.Println(err)
-			return
-		}
-		if err != nil {
-			fmt.Println(err)
+			showHelp()
 			return
 		}
 		err = config.SetPort(value)
@@ -55,6 +55,28 @@ func main() {
 			return
 		}
 		fmt.Println("Port set to: ", config.Config.Port)
+	/*case "-sc":
+		value, err := strconv.ParseBool(argsString[4:])
+		if err != nil {
+			fmt.Println(err)
+			showHelp()
+			return
+		}
+		config.SetSecurePortEnabled(value)
+		fmt.Println("Secure port set to: ", config.Config.FTPSEnabled)
+	case "-sa":
+		value, err := strconv.Atoi(argsString[4:])
+		if err != nil {
+			fmt.Println(err)
+			showHelp()
+			return
+		}
+		err = config.SetPort(value)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		fmt.Println("Port set to: ", config.Config.Port)*/
 	case "-pp":
 		ports := strings.Split(argsString[4:], "-")
 		if len(ports) != 2 {
@@ -86,6 +108,7 @@ func main() {
 		value, err := strconv.ParseBool(argsString[4:])
 		if err != nil {
 			fmt.Println(err)
+			showHelp()
 			return
 		}
 		config.SetAnonymous(value)
@@ -149,16 +172,12 @@ func main() {
 		}
 	case "-start":
 		Logger.Log("Starting server>")
-		go FTPServer.StartFTPServer(config.Config, users, stopServer)
-		readln := ""
-		for {
-			fmt.Scanln(&readln)
-			if strings.ToLower(readln) == "exit" {
-				fmt.Println("Stopping server...")
-				stopServer <- true
-				break
-			}
-		}
+		go FTPServer.StartFTPServer(config.Config, users, stopServer, false)
+		readAfterStart(&stopServer)
+	case "-sstart":
+		Logger.Log("Starting server (FTPS mode)>")
+		go FTPServer.StartFTPServer(config.Config, users, stopServer, true)
+		readAfterStart(&stopServer)
 	default:
 		showHelp()
 		return
@@ -166,6 +185,19 @@ func main() {
 	config.SaveConfig()
 	users.Save()
 }
+
+func readAfterStart(stopServer *(chan bool)) {
+	readln := ""
+	for {
+		fmt.Scanln(&readln)
+		if strings.ToLower(readln) == "exit" || strings.ToLower(readln) == "stop" {
+			fmt.Println("Stopping server...")
+			*stopServer <- true
+			break
+		}
+	}
+}
+
 func showHelp() {
 	fmt.Println("PN FTP Server Configurator commands:\r\n'-sp port_num' - set message port\r\n'-pp port_numlow port_numhigh' - set passive mode data port range\r\n'-wd path_to_dir' - set root directory\r\n'-an (true|false) || (0|1) - set anonymous user allowed\r\n'-mp' - set num of max peers\r\n'-rs' - reset config to default\r\n'-pd' - prints config file")
 	fmt.Println("'-bs size' - set send and receive buffer size (bytes)")
@@ -174,4 +206,6 @@ func showHelp() {
 	fmt.Println("'-rmuser Username' - remove specified user")
 	fmt.Println("'-prusers' - prints users list")
 	fmt.Println("Run with -start to run FTP server")
+	fmt.Println("Run with -sstart to run FTPS server (TLS certificate and key required in root server folder)")
+	fmt.Println("'exit' or 'stop' - stops FTP Server")
 }

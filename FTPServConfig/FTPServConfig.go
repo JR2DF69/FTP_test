@@ -33,7 +33,7 @@ func LoadConfig() (config *ConfigStorage, err error) {
 		return nil, err
 	}
 	config = cfg.Config
-	config.BufferSize = 8192
+	config.BufferSize = 1024
 	return config, nil
 }
 func (c *Configurator) Print() {
@@ -150,7 +150,6 @@ func (c *Configurator) SaveConfig() error {
 	if err != nil {
 		return errors.New(fmt.Sprint("func SaveConfig() error: ", err))
 	}
-	fmt.Println(c.configFile.Name())
 	ioutil.WriteFile(c.configFile.Name(), output, os.ModeAppend)
 	c.configFile.Close()
 	return err
