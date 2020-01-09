@@ -1,7 +1,6 @@
 package FTPClientConnection
 
 import (
-	//"FTPServ/CBModule"
 	"FTPServ/FTPAuth"
 	"FTPServ/FTPDataTransfer"
 	"FTPServ/FTPServConfig"
@@ -16,7 +15,6 @@ import (
 	"net"
 	"runtime"
 	"strings"
-	//"time"
 )
 
 type FTPConnection struct {
@@ -34,6 +32,8 @@ type FTPConnection struct {
 	actionBuffer         FTPConnectionBuffer
 	TLSConfig            *FTPtls.FTPTLSServerParameters
 	UsingTLS             bool
+	Logger               *Logger.LoggerConfig
+	ConnectionID         uint
 }
 type FTPConnectionBuffer struct {
 	RenameObj *ftpfs.RenameableObj
@@ -41,7 +41,7 @@ type FTPConnectionBuffer struct {
 
 var users *FTPAuth.Users
 
-func InitConnection(Connection net.Conn, serverAddr string, EndConnChannel chan string, ServerConfig *FTPServConfig.ConfigStorage, Users *FTPAuth.Users, TLSConfig *FTPtls.FTPTLSServerParameters) (*FTPConnection, error) {
+func InitConnection(Connection net.Conn, serverAddr string, EndConnChannel chan string, ServerConfig *FTPServConfig.ConfigStorage, Users *FTPAuth.Users, TLSConfig *FTPtls.FTPTLSServerParameters, id uint) (*FTPConnection, error) {
 	FTPConn := new(FTPConnection)
 	if Connection == nil {
 		return nil, errors.New("Connection is nil")
@@ -59,21 +59,24 @@ func InitConnection(Connection net.Conn, serverAddr string, EndConnChannel chan 
 	}
 	FTPConn.DataConnection = dc
 	FTPConn.TLSConfig = TLSConfig
+	//id, err := CBModule.GetCurrentConnCount()
+	//if err != nil {
+	FTPConn.ConnectionID = id
+	//	} else {
+	//		FTPConn.ConnectionID = id
+	//	}
+	FTPConn.Logger = Logger.NewLogger(FTPConn.ConnectionID, FTPConn.TCPConn.RemoteAddr())
 	return FTPConn, nil
 }
 func (FTPConn *FTPConnection) writeMessageToWriter(str string) {
 	FTPConn.Writer.WriteString(fmt.Sprint(str, "\r\n"))
 	err := FTPConn.Writer.Flush()
 	if err != nil {
-		Logger.Log("Error to flush writer: ", err)
+		FTPConn.Logger.Log(Logger.CriticalMessage, "Error to flush writer: ", err)
 	}
-	/*_, err := FTPConn.TCPConn.Write([]byte(fmt.Sprint(str, "\r\n")))
-	if err != nil {
-		Logger.Log(err)
-	}*/
 }
 func (FTPConn *FTPConnection) sendResponseToClient(command string, comment interface{}) error {
-	defer Logger.Log("Command ", command, " sent to Client")
+	defer FTPConn.Logger.Log(Logger.UserAction, "Command ", command, " sent to Client")
 	switch command {
 	case "200":
 		FTPConn.writeMessageToWriter(fmt.Sprint("200 ", comment))
@@ -119,7 +122,7 @@ func (FTPConn *FTPConnection) CloseConnection(TCPClosed bool) error {
 			FTPConn.TCPConn = nil
 		}
 	}
-	Logger.Log("Connection closed")
+	FTPConn.Logger.Log(Logger.UserAction, "Connection closed")
 	return nil
 }
 func (FTPConn *FTPConnection) InitTLSConnection() error {
@@ -142,8 +145,8 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 		reader := make([]byte, 512)
 		_, err := FTPConn.TCPConn.Read(reader)
 		if err != nil {
-			Logger.Log("parseIncomingConnection, Conn.Read error: ", err, "\r\nConnection closed.")
-			//FTPConn.CloseConnection(false)
+			FTPConn.Logger.Log(Logger.CriticalMessage, "parseIncomingConnection, Conn.Read error: ", err, "\r\nConnection closed.")
+			FTPConn.CloseConnection(false)
 			return
 		}
 		reader = bytes.Trim(reader, "\x00")
@@ -153,7 +156,7 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 			if len(strings.TrimSpace(command)) == 0 {
 				continue
 			}
-			Logger.Log(fmt.Sprint("Got command: ", command))
+			FTPConn.Logger.Log(Logger.UserAction, fmt.Sprint("Got command: ", command))
 			triSymbolCommand := command[:3]
 			switch string(triSymbolCommand) {
 			case "CCC":
@@ -174,7 +177,7 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 						FTPConn.sendResponseToClient("550", "Not a directory")
 						break
 					}
-					Logger.Log("CWD: ", err)
+					FTPConn.Logger.Log(Logger.CriticalMessage, "CWD: ", err)
 					FTPConn.sendResponseToClient("550", "Couldn't get directory")
 				}
 				FTPConn.sendResponseToClient("250", "DirectoryChanged")
@@ -238,7 +241,7 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 				if err != nil {
 					FTPConn.DataConnection.CloseConnection()
 					FTPConn.sendResponseToClient("550", "Could not send data")
-					Logger.Log("Couldn't send LIST data (key -l): ", err)
+					FTPConn.Logger.Log(Logger.CriticalMessage, "Couldn't send LIST data (key -l): ", err)
 					break
 				}
 				FTPConn.sendResponseToClient("226", "Directory sent OK")
@@ -252,7 +255,7 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 				FTPConn.DataConnection.TLSConfig = FTPConn.TLSConfig
 				passPortAddress, err := FTPConn.DataConnection.InitPassiveConnection()
 				if err != nil {
-					Logger.Log("PASV: couldn't open passive port...", err)
+					FTPConn.Logger.Log(Logger.CriticalMessage, "PASV: couldn't open passive port...", err)
 					FTPConn.sendResponseToClient("425", "PASV start error...")
 					break
 				}
@@ -276,7 +279,6 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 					FTPConn.sendResponseToClient("550", "Could not get file size")
 					break
 				}
-				Logger.Log(size)
 				FTPConn.sendResponseToClient("213", fmt.Sprint(" ", size))
 			case "STAT":
 				if FTPConn.IsAuthenticated() == false {
@@ -286,7 +288,7 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 				path := command[5:]
 				stat, err := FTPConn.FileSystem.STAT(path)
 				if err != nil {
-					Logger.Log("STAT error: ", err)
+					FTPConn.Logger.Log(Logger.CriticalMessage, "STAT error: ", err)
 					FTPConn.sendResponseToClient("550", "Couldn't get STAT")
 				}
 				FTPConn.sendResponseToClient("213", "-Status")
@@ -300,8 +302,11 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 				if len(command) <= 5 {
 					FTPConn.sendResponseToClient("500", "No protocol type specified")
 				}
+				if FTPConn.UsingTLS {
+					FTPConn.sendResponseToClient("500", "Already using TLS...")
+				}
 				Authtype := command[5:]
-				Logger.Log("Client asks for protection using: ", Authtype)
+				FTPConn.Logger.Log(Logger.UserAction, "Client asks for protection using: ", Authtype)
 				switch strings.ToUpper(Authtype) {
 				case "TLS":
 					fallthrough
@@ -309,7 +314,7 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 					FTPConn.sendResponseToClient("234", "")
 					if err := FTPConn.InitTLSConnection(); err != nil {
 						FTPConn.sendResponseToClient("500", "Couldn't use TLS...")
-						Logger.Log("TLS error: ", err)
+						FTPConn.Logger.Log(Logger.CriticalMessage, "TLS error: ", err)
 						break
 					}
 					FTPConn.UsingTLS = true
@@ -323,7 +328,7 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 				renameobj, err := FTPConn.FileSystem.NewRenameableObj(oldName)
 				if err != nil {
 					FTPConn.sendResponseToClient("550", "Can't rename obj")
-					Logger.Log("Rename object error: ", err)
+					FTPConn.Logger.Log(Logger.CriticalMessage, "Rename object error: ", err)
 					break
 				}
 				FTPConn.actionBuffer.RenameObj = renameobj
@@ -342,7 +347,7 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 				err := FTPConn.FileSystem.Rename(FTPConn.actionBuffer.RenameObj)
 				if err != nil {
 					FTPConn.sendResponseToClient("550", "Couldn't rename object")
-					Logger.Log("RNTO error: ", err)
+					FTPConn.Logger.Log(Logger.CriticalMessage, "RNTO error: ", err)
 					break
 				}
 				FTPConn.sendResponseToClient("250", "Object renamed")
@@ -355,13 +360,13 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 				file, err := FTPConn.FileSystem.STOR(fileName)
 				if err != nil {
 					FTPConn.sendResponseToClient("550", "Can't create new specified file")
-					Logger.Log("STOR error: ", err)
+					FTPConn.Logger.Log(Logger.CriticalMessage, "STOR error: ", err)
 					break
 				}
 				FTPConn.sendResponseToClient("150", "Ready to receive data")
 				err = FTPConn.DataConnection.ReceiveBinaryFile(file.Name())
 				if err != nil {
-					Logger.Log("STOR error (receiving data): ", err)
+					FTPConn.Logger.Log(Logger.CriticalMessage, "STOR error (receiving data): ", err)
 					FTPConn.sendResponseToClient("550", "Can't write specified data")
 					break
 				}
@@ -374,7 +379,6 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 				userName = bytes.Trim(userName, "\r")
 				userNameStr := string(userName)
 				if strings.ToLower(userNameStr) == "anonymous" {
-					Logger.Log("This is anonymous!")
 					if FTPConn.GlobalConfig.Anonymous == false {
 						FTPConn.sendResponseToClient("530", "")
 						//FTPConn.CloseConnection()
@@ -386,7 +390,7 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 				}
 				user := users.CheckUserName(userNameStr)
 				if user == nil {
-					Logger.Log("Command \"USER\": wrong user name!")
+					FTPConn.Logger.Log(Logger.UserAction, "Command \"USER\": wrong user name!")
 					FTPConn.sendResponseToClient("430", "Wrong username")
 					break
 				}
@@ -404,13 +408,15 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 					FTPConn.User = nil
 					break
 				}
-				//CBModule.RegUser(FTPConn.User.UserName, FTPConn.TCPConn.RemoteAddr().String(), time.Now())
+				//костыль, лень переделывать было
+				//id := CBModule.RegConnection(FTPConn.User.UserName, FTPConn.TCPConn.RemoteAddr().String(), time.Now())
+				//FTPConn.ConnectionID = id
+				//FTPConn.Logger.ConnID = id
 				FTPConn.FileSystem.InitFileSystem(FTPConn.GlobalConfig, FTPConn.User)
 				FTPConn.sendResponseToClient("230", "Authenticated")
 				//new pass
 				break
 			case "PORT":
-				Logger.Log("PORT sent to Server")
 				if FTPConn.IsAuthenticated() == false {
 					FTPConn.sendResponseToClient("530", "Not logged in")
 					break
@@ -430,7 +436,7 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 				fileName := command[5:]
 				file, err := FTPConn.FileSystem.RETR(fileName)
 				if err != nil {
-					Logger.Log("RETR Command, fsRETR error: ", err)
+					FTPConn.Logger.Log(Logger.CriticalMessage, "RETR Command, fsRETR error: ", err)
 					FTPConn.sendResponseToClient("550", "File transfer error")
 					return
 				}
@@ -438,7 +444,7 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 				go func() {
 					err = FTPConn.DataConnection.TransferBinaryFile(file)
 					if err != nil {
-						Logger.Log("RETR command error: ", err)
+						FTPConn.Logger.Log(Logger.CriticalMessage, "RETR command error: ", err)
 						FTPConn.sendResponseToClient("550", "File transfer error")
 						return
 					}
@@ -466,7 +472,7 @@ func (FTPConn *FTPConnection) ParseIncomingConnection() {
 					FTPConn.sendResponseToClient("530", "Not logged in")
 					break
 				}
-				Logger.Log("Closing connection")
+				FTPConn.Logger.Log(Logger.CriticalMessage, "Closing connection")
 				FTPConn.CloseConnection(true)
 				return
 			}
