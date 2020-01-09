@@ -1,3 +1,4 @@
+//For FTP User Authentication
 package FTPAuth
 
 import (
@@ -26,6 +27,7 @@ type User struct {
 	Folder   string
 }
 
+//Returns UsersList configuration, err in couldn't load
 func LoadUsersList() (*Users, error) {
 	Users := new(Users)
 	usersFile, err := os.Open(usersFileName)
@@ -40,6 +42,8 @@ func LoadUsersList() (*Users, error) {
 	Users.usersFile = usersFile
 	return Users, nil
 }
+
+//Hashes pswd
 func HashPswd(pswd *string) {
 	hash := sha256.New()
 	*pswd = hex.EncodeToString(hash.Sum([]byte(*pswd)))
